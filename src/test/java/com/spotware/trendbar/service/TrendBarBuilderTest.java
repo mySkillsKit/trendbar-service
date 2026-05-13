@@ -13,7 +13,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@DisplayName("TrendBar.Builder")
+@DisplayName("TrendBarBuilder")
 class TrendBarBuilderTest {
 
     public static final PeriodType PERIOD_TYPE = PeriodType.M1;
@@ -96,8 +96,6 @@ class TrendBarBuilderTest {
     @Test
     @DisplayName("startTimestamp is floored to M1 boundary when quote arrives mid-minute")
     void startTimestampIsFlooredToMinuteBoundary() {
-        // Quote at 00:00:47.312 — within the first minute of 2024-01-01.
-        // Without floor the bar would span [00:00:47, 00:01:47); with floor it spans [00:00:00, 00:01:00).
         Quote quote = new Quote(100L, SYMBOL, INTRA_MINUTE_TS);
         TrendBar.TrendBarBuilder builder = createTrendBarBuilder(quote, PERIOD_TYPE);
 
@@ -109,7 +107,6 @@ class TrendBarBuilderTest {
     @Test
     @DisplayName("startTimestamp is floored to H1 boundary when quote arrives mid-hour")
     void startTimestampIsFlooredToHourBoundary() {
-        // Quote at 00:20:15.500 — within the first hour of 2024-01-01.
         Quote quote = new Quote(100L, SYMBOL, INTRA_HOUR_TS);
         TrendBar.TrendBarBuilder builder = createTrendBarBuilder(quote, PeriodType.H1);
 
@@ -121,26 +118,20 @@ class TrendBarBuilderTest {
     @Test
     @DisplayName("isCompletedAt fires at the floored period boundary, not rawTs + duration")
     void isCompletedAtUsesPeriodBoundaryNotRawQuoteTimestamp() {
-        // Quote at 00:00:47.312; floor → startTimestamp = 00:00:00.000.
-        // Without floor the bar would complete only at rawTs + 60_000 = 00:01:47.312.
-        // With floor it completes at boundary + 60_000 = 00:01:00.000 — 47 seconds earlier.
         Quote quote = new Quote(100L, SYMBOL, INTRA_MINUTE_TS);
         TrendBar.TrendBarBuilder builder = createTrendBarBuilder(quote, PERIOD_TYPE);
 
-        long correctCompletionTs = MINUTE_BOUNDARY + PERIOD_TYPE.durationMs(); // 00:01:00.000
-        long withoutFloorCompletionTs = INTRA_MINUTE_TS + PERIOD_TYPE.durationMs(); // 00:01:47.312
+        long correctCompletionTs = MINUTE_BOUNDARY + PERIOD_TYPE.durationMs();
+        long withoutFloorCompletionTs = INTRA_MINUTE_TS + PERIOD_TYPE.durationMs();
 
-        // The two completion times are different — floor shifted the start earlier.
         assertThat(correctCompletionTs)
                 .as("completion with floor must be earlier than without floor")
                 .isLessThan(withoutFloorCompletionTs);
 
-        // Bar must NOT be complete one ms before the correct period boundary.
         assertThat(builder.isCompletedAt(correctCompletionTs - 1))
                 .as("not yet complete at 00:00:59.999")
                 .isFalse();
 
-        // Bar completes exactly at the floored period boundary, not at rawTs + duration.
         assertThat(builder.isCompletedAt(correctCompletionTs))
                 .as("complete at 00:01:00.000 — the M1 boundary")
                 .isTrue();
@@ -149,7 +140,6 @@ class TrendBarBuilderTest {
     @Test
     @DisplayName("quote exactly on boundary produces startTimestamp equal to that boundary")
     void quoteExactlyOnBoundaryStartsAtThatBoundary() {
-        // A quote arriving exactly on the minute boundary should not shift the start.
         Quote quote = new Quote(100L, SYMBOL, MINUTE_BOUNDARY);
         TrendBar.TrendBarBuilder builder = createTrendBarBuilder(quote, PERIOD_TYPE);
 

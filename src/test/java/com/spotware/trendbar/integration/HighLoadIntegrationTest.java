@@ -1,13 +1,16 @@
 package com.spotware.trendbar.integration;
 
+import com.spotware.trendbar.config.NamedThreadFactory;
+import com.spotware.trendbar.constant.Constants;
 import com.spotware.trendbar.dao.InMemoryTrendBarDao;
 import com.spotware.trendbar.model.PeriodType;
 import com.spotware.trendbar.model.Quote;
 import com.spotware.trendbar.model.Symbol;
 import com.spotware.trendbar.model.TrendBar;
-import com.spotware.trendbar.service.DefaultHistoryService;
-import com.spotware.trendbar.service.DefaultTrendBarsAggregateService;
 import com.spotware.trendbar.service.HistoryService;
+import com.spotware.trendbar.service.impl.DefaultHistoryServiceImpl;
+import com.spotware.trendbar.service.impl.DefaultTrendBarsAggregateServiceImpl;
+import com.spotware.trendbar.service.impl.SymbolWorkerSupervisor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,7 +20,11 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,20 +44,36 @@ class HighLoadIntegrationTest {
     private static final long QUOTES_TO_PRODUCE = 1_000_000L;
     private static final int READER_THREADS = 4;
 
-    private DefaultTrendBarsAggregateService aggregator;
+    private DefaultTrendBarsAggregateServiceImpl aggregator;
+    private SymbolWorkerSupervisor supervisor;
     private HistoryService history;
 
     @BeforeEach
     void setUp() {
         InMemoryTrendBarDao dao = new InMemoryTrendBarDao();
-        history = new DefaultHistoryService(dao);
-        aggregator = new DefaultTrendBarsAggregateService(history);
-        aggregator.start();
+        history = new DefaultHistoryServiceImpl(dao);
+
+        Map<Symbol, BlockingQueue<Quote>> queues = new EnumMap<>(Symbol.class);
+        for (Symbol s : Symbol.values()) {
+            queues.put(s, new ArrayBlockingQueue<>(Constants.QUEUE_CAPACITY));
+        }
+
+        Map<Symbol, ExecutorService> executors = new EnumMap<>(Symbol.class);
+        for (Symbol s : Symbol.values()) {
+            executors.put(s, Executors.newSingleThreadExecutor(
+                new NamedThreadFactory("QuoteProcessor-" + s)));
+        }
+
+        supervisor = new SymbolWorkerSupervisor(queues, history, executors);
+        aggregator = new DefaultTrendBarsAggregateServiceImpl(queues, supervisor);
+        supervisor.start();
     }
 
     @AfterEach
-    void tearDown() throws InterruptedException {
-        aggregator.stop();
+    void tearDown() {
+        if (supervisor.isRunning()) {
+            supervisor.stop();
+        }
     }
 
     @Test
@@ -96,16 +119,19 @@ class HighLoadIntegrationTest {
         readersReady.await();
 
         long startNanos = System.nanoTime();
+        long submitted = 0;
         Quote q;
         while ((q = producer.nextQuote()) != null) {
             aggregator.consume(q);
+            submitted++;
         }
         long produced = producer.producedCount();
         producerDone.set(true);
 
+        long submittedFinal = submitted;
         await().atMost(Duration.ofSeconds(30))
                 .pollDelay(Duration.ofMillis(50))
-                .until(() -> aggregator.queueSize() == 0);
+                .until(() -> supervisor.totalProcessed() >= submittedFinal);
 
         readers.shutdown();
         readers.awaitTermination(5, TimeUnit.SECONDS);
